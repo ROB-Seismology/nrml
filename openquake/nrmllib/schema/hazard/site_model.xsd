@@ -24,6 +24,8 @@
         <xs:attribute name="z1pt0" type="PositiveNonZeroDoubleType" />
         <!-- Depth to shear wave velocity of 2.5 km/s. Units km. -->
         <xs:attribute name="z2pt5" type="PositiveNonZeroDoubleType" />
+        <!-- Kappa zero. Units s. -->
+        <xs:attribute name="kappa" type="PositiveNonZeroDoubleType" />
     </xs:complexType>
 
     <xs:simpleType name="VS30Type">

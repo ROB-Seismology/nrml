@@ -28,8 +28,7 @@ from itertools import izip
 
 import openquake.nrmllib
 from openquake.nrmllib import NRMLFile
-from openquake.nrmllib import utils
-from openquake.nrmllib import models
+from openquake.nrmllib import models, node
 
 
 SM_TREE_PATH = 'sourceModelTreePath'
@@ -125,12 +124,12 @@ def _set_metadata(element, metadata, attr_map, transform=str):
             element.set(attr, transform(value))
 
 
-class BaseCurveXMLWriter(object):
+class BaseCurveWriter(object):
     """
     Base class for curve writers.
 
     :param dest:
-        File path (including filename) or file-like object for XML results to
+        File path (including filename) or file-like object for results to
         be saved to.
     :param metadata:
         The following keyword args are required:
@@ -161,9 +160,9 @@ class BaseCurveXMLWriter(object):
         raise NotImplementedError
 
 
-class HazardCurveXMLWriter(BaseCurveXMLWriter):
+class HazardCurveXMLWriter(BaseCurveWriter):
     """
-    Hazard Curve XML writer. See :class:`BaseCurveXMLWriter` for a list of
+    Hazard Curve XML writer. See :class:`BaseCurveWriter` for a list of
     general constructor inputs.
 
     The following additional metadata params are required:
@@ -221,6 +220,57 @@ class HazardCurveXMLWriter(BaseCurveXMLWriter):
             poes_elem.text = ' '.join([str(x) for x in hc.poes])
 
 
+class HazardCurveGeoJSONWriter(BaseCurveWriter):
+    """
+    Writes hazard curves to GeoJSON. Has the same constructor and interface as
+    :class:`HazardCurveXMLWriter`.
+    """
+
+    def serialize(self, data):
+        """
+        Write the hazard curves to the given as GeoJSON. The GeoJSON format
+        is customized to contain various bits of metadata.
+
+        See :meth:`HazardCurveXMLWriter.serialize` for expected input.
+        """
+        oqmetadata = {}
+        for key, value in self.metadata.iteritems():
+            if key == 'imls':
+                oqmetadata['IMLs'] = value
+            if value is not None:
+                if key == 'imls':
+                    oqmetadata['IMLs'] = value
+                else:
+                    oqmetadata[_ATTR_MAP.get(key)] = str(value)
+
+        features = []
+        feature_coll = {
+            'type': 'FeatureCollection',
+            'features': features,
+            'oqtype': 'HazardCurve',
+            'oqnrmlversion': '0.4',
+            'oqmetadata': oqmetadata,
+        }
+        for hc in data:
+            poes = list(hc.poes)
+            lon = hc.location.x
+            lat = hc.location.y
+
+            feature = {
+                'type': 'Feature',
+                'geometry': {
+                    'type': 'Point',
+                    'coordinates': [float(lon), float(lat)],
+                },
+                'properties': {'poEs': list(poes)},
+            }
+            features.append(feature)
+
+        with NRMLFile(self.dest, 'w') as fh:
+            json.dump(feature_coll, fh, sort_keys=True, indent=4,
+                      separators=(',', ': '))
+
+
 class MultiHazardCurveXMLWriter(object):
     """
     A serializer of multiple hazard curve set having multiple
@@ -261,6 +311,30 @@ class MultiHazardCurveXMLWriter(object):
             fh.write(etree.tostring(
                 root, pretty_print=True, xml_declaration=True,
                 encoding='UTF-8'))
+
+
+def gen_gmfs(gmf_set):
+    """
+    Generate GMF nodes from a gmf_set
+    :param gmf_set: a sequence of GMF objects with attributes
+    imt, sa_period, sa_damping, rupture_id and containing a list
+    of GMF nodes with attributes gmv and location.
+    """
+    for gmf in gmf_set:
+        gmf_node = node.Node('gmf')
+        gmf_node['IMT'] = gmf.imt
+        if gmf.imt == 'SA':
+            gmf_node['saPeriod'] = str(gmf.sa_period)
+            gmf_node['saDamping'] = str(gmf.sa_damping)
+        tag = gmf.rupture_id
+        if tag:
+            gmf_node['ruptureId'] = tag
+        gmf_node.nodes = (
+            node.Node('node', dict(gmv=str(n.gmv),
+                                   lon=str(n.location.x),
+                                   lat=str(n.location.y)))
+            for n in gmf)
+        yield gmf_node
 
 
 class EventBasedGMFXMLWriter(object):
@@ -308,49 +382,32 @@ class EventBasedGMFXMLWriter(object):
             * `lon` and `lat` attributes (to indicate the geographical location
               of the ground motion field)
         """
-        with NRMLFile(self.dest, 'w') as fh:
-            root = etree.Element('nrml',
-                                 nsmap=openquake.nrmllib.SERIALIZE_NS_MAP)
+        gmf_set_nodes = []
+        for gmf_set in data:
+            gmf_set_node = node.Node('gmfSet')
+            gmf_set_node['investigationTime'] = str(gmf_set.investigation_time)
+            gmf_set_node['stochasticEventSetId'] = str(
+                gmf_set.stochastic_event_set_id)
+            gmf_set_node.nodes = gen_gmfs(gmf_set)
+            gmf_set_nodes.append(gmf_set_node)
 
-            if self.sm_lt_path is not None and self.gsim_lt_path is not None:
-                # A normal GMF collection
-                gmf_container = etree.SubElement(root, 'gmfCollection')
-                gmf_container.set(SM_TREE_PATH, self.sm_lt_path)
-                gmf_container.set(GSIM_TREE_PATH, self.gsim_lt_path)
-            else:
-                # A collection of GMFs for a complete logic tree
-                # In this case, we should only have a single <gmfSet>,
-                # containing all ground motion fields.
-                # NOTE: In this case, there is no need for a <gmfCollection>
-                # element; instead, we just write the single <gmfSet>
-                # underneath the root <nrml> element.
-                gmf_container = root
+        if self.sm_lt_path is not None and self.gsim_lt_path is not None:
+            # A normal GMF collection
+            gmf_container = node.Node('gmfCollection')
+            gmf_container[SM_TREE_PATH] = self.sm_lt_path
+            gmf_container[GSIM_TREE_PATH] = self.gsim_lt_path
+            gmf_container.nodes = gmf_set_nodes
+        else:
+            # A collection of GMFs for a complete logic tree
+            # In this case, we should only have a single <gmfSet>,
+            # containing all ground motion fields.
+            # NOTE: In this case, there is no need for a <gmfCollection>
+            # element; instead, we just write the single <gmfSet>
+            # underneath the root <nrml> element.
+            gmf_container = gmf_set_nodes[0]
 
-            for gmf_set in data:
-                gmf_set_elem = etree.SubElement(gmf_container, 'gmfSet')
-                gmf_set_elem.set(
-                    'investigationTime', str(gmf_set.investigation_time))
-                gmf_set_elem.set(
-                    'stochasticEventSetId',
-                    str(gmf_set.stochastic_event_set_id))
-
-                for gmf in gmf_set:
-                    gmf_elem = etree.SubElement(gmf_set_elem, 'gmf')
-                    gmf_elem.set('IMT', gmf.imt)
-                    if gmf.imt == 'SA':
-                        gmf_elem.set('saPeriod', str(gmf.sa_period))
-                        gmf_elem.set('saDamping', str(gmf.sa_damping))
-                    gmf_elem.set('ruptureId', str(gmf.rupture_id))
-
-                    for gmf_node in gmf:
-                        node_elem = etree.SubElement(gmf_elem, 'node')
-                        node_elem.set('gmv', str(gmf_node.gmv))
-                        node_elem.set('lon', str(gmf_node.location.x))
-                        node_elem.set('lat', str(gmf_node.location.y))
-
-            fh.write(etree.tostring(
-                root, pretty_print=True, xml_declaration=True,
-                encoding='UTF-8'))
+        with open(self.dest, 'w') as dest:
+            node.node_to_nrml(gmf_container, dest)
 
 
 class SESXMLWriter(object):
@@ -380,11 +437,11 @@ class SESXMLWriter(object):
             Each "SES" object should:
 
             * have an `investigation_time` attribute
-            * have an `id` attribute
+            * have an `ordinal` attribute
             * be iterable, yielding a sequence of "rupture" objects
 
-            Each "rupture" should have the following attributes:
-            * `id`
+            Each rupture" should have the following attributes:
+            * `tag`
             * `magnitude`
             * `strike`
             * `dip`
@@ -453,12 +510,12 @@ class SESXMLWriter(object):
             for ses in data:
                 ses_elem = etree.SubElement(
                     ses_container, 'stochasticEventSet')
-                ses_elem.set('id', str(ses.id))
+                ses_elem.set('id', str(ses.ordinal or 1))
                 ses_elem.set('investigationTime', str(ses.investigation_time))
 
                 for rupture in ses:
                     rup_elem = etree.SubElement(ses_elem, 'rupture')
-                    rup_elem.set('id', str(rupture.id))
+                    rup_elem.set('id', str(rupture.tag))
                     rup_elem.set('magnitude', str(rupture.magnitude))
                     rup_elem.set('strike', str(rupture.strike))
                     rup_elem.set('dip', str(rupture.dip))
@@ -670,14 +727,14 @@ class HazardMapGeoJSONWriter(HazardMapWriter):
             if value is not None:
                 oqmetadata[_ATTR_MAP.get(key)] = str(value)
 
+        features = []
         feature_coll = {
             'type': 'FeatureCollection',
-            'features': [],
+            'features': features,
             'oqtype': 'HazardMap',
             'oqnrmlversion': '0.4',
             'oqmetadata': oqmetadata,
         }
-        features = feature_coll['features']
 
         for lon, lat, iml in data:
             feature = {
@@ -686,12 +743,13 @@ class HazardMapGeoJSONWriter(HazardMapWriter):
                     'type': 'Point',
                     'coordinates': [float(lon), float(lat)],
                 },
-                'properties': {'iml': str(iml)},
+                'properties': {'iml': float(iml)},
             }
             features.append(feature)
 
         with NRMLFile(self.dest, 'w') as fh:
-            json.dump(feature_coll, fh)
+            json.dump(feature_coll, fh, sort_keys=True, indent=4,
+                      separators=(',', ': '))
 
 
 class DisaggXMLWriter(object):
@@ -845,30 +903,14 @@ class ScenarioGMFXMLWriter(object):
             * `lon` and `lat` attributes (to indicate the geographical location
               of the ground motion field
         """
-        with NRMLFile(self.dest, 'w') as fh:
-            root = etree.Element('nrml',
-                                 nsmap=openquake.nrmllib.SERIALIZE_NS_MAP)
-            gmfset = etree.SubElement(root, 'gmfSet')
-            for gmf in data:
-                gmf_elem = etree.SubElement(gmfset, 'gmf')
-                gmf_elem.set('IMT', gmf.imt)
-                if gmf.imt == 'SA':
-                    gmf_elem.set('saPeriod', str(gmf.sa_period))
-                    gmf_elem.set('saDamping', str(gmf.sa_damping))
-                for gmf_node in gmf:
-                    node_elem = etree.SubElement(gmf_elem, 'node')
-                    node_elem.set('gmv', str(gmf_node.gmv))
-                    node_elem.set('lon', str(gmf_node.location.x))
-                    node_elem.set('lat', str(gmf_node.location.y))
-
-            fh.write(etree.tostring(
-                root, pretty_print=True, xml_declaration=True,
-                encoding='UTF-8'))
+        gmfset = node.Node('gmfSet', {}, nodes=gen_gmfs(data))
+        with open(self.dest, 'w') as dest:
+            node.node_to_nrml(gmfset, dest)
 
 
-class UHSXMLWriter(BaseCurveXMLWriter):
+class UHSXMLWriter(BaseCurveWriter):
     """
-    UHS curve XML writer. See :class:`BaseCurveXMLWriter` for a list of general
+    UHS curve XML writer. See :class:`BaseCurveWriter` for a list of general
     constructor inputs.
 
     The following additional metadata params are required:
