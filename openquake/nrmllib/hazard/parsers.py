@@ -475,7 +475,7 @@ class SiteModelParser(object):
                 site.vs30_type = element.get('vs30Type').strip()
                 site.z1pt0 = float(element.get('z1pt0'))
                 site.z2pt5 = float(element.get('z2pt5'))
-                site.kappa = float(element.get('kappa'))
+                site.kappa = float(element.get('kappa', 0.))
                 lonlat = dict(lon=element.get('lon').strip(),
                               lat=element.get('lat').strip())
                 site.wkt = 'POINT(%(lon)s %(lat)s)' % lonlat
