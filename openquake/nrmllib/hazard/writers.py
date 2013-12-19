@@ -873,6 +873,57 @@ class DisaggXMLWriter(object):
                 encoding='UTF-8'))
 
 
+class DisaggFullMatrixXMLWriter(object):
+    """
+    Alternative version for class DisaggXMLWriter to write full disagg matrix.
+    """
+    BIN_EDGE_ATTR_MAP = DisaggXMLWriter.BIN_EDGE_ATTR_MAP
+    DIM_LABEL_TO_BIN_EDGE_MAP = DisaggXMLWriter.DIM_LABEL_TO_BIN_EDGE_MAP
+
+    def __init__(self, dest, **metadata):
+        self.dest = dest
+        self.metadata = metadata
+        _validate_hazard_metadata(self.metadata)
+
+
+    def serialize(self, disagg_result):
+        with NRMLFile(self.dest, 'w') as fh:
+            root = etree.Element('nrml',
+                                 nsmap=openquake.nrmllib.SERIALIZE_NS_MAP)
+
+            diss_matrix = etree.SubElement(root, 'disaggMatrix')
+
+            _set_metadata(diss_matrix, self.metadata, _ATTR_MAP)
+
+            transform = lambda val: ', '.join([str(x) for x in val])
+            _set_metadata(diss_matrix, self.metadata, self.BIN_EDGE_ATTR_MAP,
+                          transform=transform)
+
+            # Check that we have bin edges defined for each dimension label
+            # (mag, dist, lon, lat, eps, TRT)
+            for label in disagg_result.dim_labels:
+                bin_edge_attr = self.DIM_LABEL_TO_BIN_EDGE_MAP.get(label)
+                assert self.metadata.get(bin_edge_attr) is not None, (
+                    "Writer is missing '%s' metadata" % bin_edge_attr
+                )
+
+            dims = ','.join([str(x) for x in disagg_result.matrix.shape])
+            diss_matrix.set('dims', dims)
+
+            diss_matrix.set('poE', str(disagg_result.poe))
+            diss_matrix.set('iml', str(disagg_result.iml))
+
+            for idxs, value in numpy.ndenumerate(disagg_result.matrix):
+                prob = etree.SubElement(diss_matrix, 'prob')
+                index = ','.join([str(x) for x in idxs])
+                prob.set('index', index)
+                prob.set('value', str(value))
+
+            fh.write(etree.tostring(
+                root, pretty_print=True, xml_declaration=True,
+                encoding='UTF-8'))
+
+
 class ScenarioGMFXMLWriter(object):
     """
     :param dest:
